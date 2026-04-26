@@ -247,7 +247,7 @@ void StartReaderTask(void *argument)
             if (toYield)
             {
                 log("ReaderTask: yield\r\n");
-                osDelay(10);
+                osDelay(5);
             }
         }
     }
