@@ -19,13 +19,13 @@ osThreadId_t readerTaskHandle;
 const osThreadAttr_t readerTask_attributes = {
   .name = "ReaderTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal
+  .priority = (osPriority_t) osPriorityNormal
 };
 osThreadId_t loggerTaskHandle;
 const osThreadAttr_t loggerTask_attributes = {
   .name = "LoggerTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal
+  .priority = (osPriority_t) osPriorityAboveNormal
 };
 osThreadId_t monitorTaskHandle;
 const osThreadAttr_t monitorTask_attributes = {
@@ -118,7 +118,7 @@ int main(void)
 	//monitorTaskHandle = osThreadNew(StartMonitorTask, NULL, &monitorTask_attributes);
 	IRQsimuTaskHandle = osThreadNew(StartIRQsimuTask, NULL, &IRQsimuTask_attributes);
 #endif
-    messageQueueHandle = osMessageQueueNew(8, sizeof(CMessage), &messageQueue_attributes);
+    messageQueueHandle = osMessageQueueNew(16, sizeof(CMessage), &messageQueue_attributes);
 	timer10msHandle = osTimerNew(Timer10msCallback, osTimerPeriodic, NULL, &timer10ms_attributes);
     osTimerStart(timer10msHandle, 10);
 
@@ -155,9 +155,11 @@ bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
         rxHeader.Identifier = 0x00CE;
         rxHeader.DataLength = 8;
         rxHeader.IdType = FDCAN_STANDARD_ID;
-        rxHeader.FilterIndex = 123;
+        rxHeader.FilterIndex = 99;
 #else
+        osKernelLock();
         bool result{HAL_FDCAN_GetRxMessage(hfdcan, RxLocation, &rxHeader, rxData) == HAL_OK};
+        osKernelUnlock();
 #endif
         if (result)
         {
@@ -247,7 +249,7 @@ void StartReaderTask(void *argument)
             if (toYield)
             {
                 log("ReaderTask: yield\r\n");
-                osDelay(5);
+                osDelay(1);
             }
         }
     }
@@ -308,7 +310,7 @@ void StartLoggerTask(void *argument)
         {
             log("LoggerTask: exit, messages in queue = %d\r\n", messagesInQueue);
             log("LoggerTask: yield\r\n");
-            osDelay(2);
+            osDelay(1);
         }
     }
 }
@@ -350,26 +352,18 @@ void StartIRQsimuTask(void *argument)
         if (0 != osMessageQueueGetSpace(messageQueueHandle))
         {
             osThreadFlagsSet(readerTaskHandle, FDCAN1_FIFO0);
-            //log("                                                       IRQsimuTask:  EVENT SENT\r\n");
-            osDelay(1);
         }
         if (0 != osMessageQueueGetSpace(messageQueueHandle))
         {
             osThreadFlagsSet(readerTaskHandle, FDCAN1_FIFO1);
-            //log("                                                       IRQsimuTask:  EVENT SENT\r\n");
-            osDelay(1);
         }
         if (0 != osMessageQueueGetSpace(messageQueueHandle))
         {
             osThreadFlagsSet(readerTaskHandle, FDCAN2_FIFO0);
-            //log("                                                       IRQsimuTask:  EVENT SENT\r\n");
-            osDelay(1);
         }
         if (0 != osMessageQueueGetSpace(messageQueueHandle))
         {
             osThreadFlagsSet(readerTaskHandle, FDCAN2_FIFO1);
-            //log("                                                       IRQsimuTask:  EVENT SENT\r\n");
-            osDelay(1);
         }
         osDelay(1);
     }
@@ -390,7 +384,7 @@ void Timer10msCallback(void *argument)
     {
         msCounterToFlush = 0;
         toFlushData = true;
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_6);
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
         log("HAL_TIM_PeriodElapsedCallback: toFlushData\r\n");
     }
 }
@@ -649,8 +643,12 @@ void updateDateAndTime(const uint32_t ID, const uint8_t *data)
 
 void saveData(const uint32_t timestamp, const uint32_t ID, const bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, const uint8_t length, const uint8_t *payload)
 {
-    f_printf(&USERFile, "%08d,%08X,%s,%s,%d%02d,%lu",
+    static uint16_t counter{0};
+    static uint16_t timestampPrevious{0};
+    counter = ((timestampPrevious == timestamp) ? (counter + 1) : 0);
+    f_printf(&USERFile, "%08d%02d0,%08X,%s,%s,%d%02d,%lu",
             timestamp,
+            counter,
             ID,
           ((isExtended) ? "true" : "false"),
             dir,
@@ -662,6 +660,7 @@ void saveData(const uint32_t timestamp, const uint32_t ID, const bool isExtended
         f_printf(&USERFile, ",%02X", payload[i]);
     }
     f_printf(&USERFile, "\n");
+    timestampPrevious = timestamp;
 }
 
 void diagnosticController(const uint32_t timestamp, uint32_t ID, bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, uint8_t length, uint8_t *payload)
