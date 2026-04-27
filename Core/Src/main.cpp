@@ -1,4 +1,4 @@
-#include "main.hpp"
+#include "main.h"
 #include "cmsis_os.h"
 #include "fdcan.h"
 #include "usart.h"
@@ -15,27 +15,21 @@ extern "C"
 //#define SIMU_ENABLED
 #define SENDER_ENABLED
 
-osThreadId_t readerTaskHandle;
-const osThreadAttr_t readerTask_attributes = {
-  .name = "ReaderTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal
-};
 osThreadId_t loggerTaskHandle;
 const osThreadAttr_t loggerTask_attributes = {
   .name = "LoggerTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal
+};
+osThreadId_t IRQsimuTaskHandle;
+const osThreadAttr_t IRQsimuTask_attributes = {
+  .name = "IRQsimuTask",
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal
 };
 osThreadId_t monitorTaskHandle;
 const osThreadAttr_t monitorTask_attributes = {
   .name = "MonitorTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityHigh1
-};
-osThreadId_t IRQsimuTaskHandle;
-const osThreadAttr_t IRQsimuTask_attributes = {
-  .name = "IRQsimuTask",
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityHigh
 };
@@ -48,16 +42,10 @@ const osTimerAttr_t timer10ms_attributes = {
   .name = "timer10ms"
 };
 
-const uint32_t FDCAN1_FIFO0{1U << 0};
-const uint32_t FDCAN1_FIFO1{1U << 1};
-const uint32_t FDCAN2_FIFO0{1U << 2};
-const uint32_t FDCAN2_FIFO1{1U << 3};
-
 void SystemClock_Config();
 void StartLoggerTask(void *argument);
-void StartReaderTask(void *argument);
-void StartMonitorTask(void *argument);
 void StartIRQsimuTask(void *argument);
+void StartMonitorTask(void *argument);
 void Timer10msCallback(void *argument);
 
 const char* getString(const FRESULT fr);
@@ -112,11 +100,10 @@ int main(void)
 
 	osKernelInitialize();
 
-	readerTaskHandle = osThreadNew(StartReaderTask, NULL, &readerTask_attributes);
-    loggerTaskHandle = osThreadNew(StartLoggerTask, NULL, &loggerTask_attributes);
+	loggerTaskHandle = osThreadNew(StartLoggerTask, NULL, &loggerTask_attributes);
 #ifdef SIMU_ENABLED
-	//monitorTaskHandle = osThreadNew(StartMonitorTask, NULL, &monitorTask_attributes);
 	IRQsimuTaskHandle = osThreadNew(StartIRQsimuTask, NULL, &IRQsimuTask_attributes);
+    //monitorTaskHandle = osThreadNew(StartMonitorTask, NULL, &monitorTask_attributes);
 #endif
     messageQueueHandle = osMessageQueueNew(16, sizeof(CMessage), &messageQueue_attributes);
 	timer10msHandle = osTimerNew(Timer10msCallback, osTimerPeriodic, NULL, &timer10ms_attributes);
@@ -128,131 +115,6 @@ int main(void)
 	{
 	    printf("\r\nYOU ARE IN THE VERY MIDDLE OF THE ASS!!!\r\n");
 	}
-}
-
-bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
-{
-    const uint8_t channelID{static_cast<uint8_t>((hfdcan->Instance == FDCAN1) ? 1 : 2)};
-    bool returnResult{false};
-#ifdef SIMU_ENABLED
-    uint32_t rxFIFOfillLevel{3};
-#else
-    uint32_t rxFIFOfillLevel{HAL_FDCAN_GetRxFifoFillLevel(hfdcan, RxLocation)};
-#endif
-    uint32_t queueFreeSpace{osMessageQueueGetSpace(messageQueueHandle)};
-    while (
-           (0 < rxFIFOfillLevel)                                                        // if there is something to read out from CANs FIFOs
-           &&                                                                           // AND
-           (0 < queueFreeSpace)                                                         // there is free space in message queue to store data
-          )
-    {
-        log("readOutMessages(): RX FIFO fill Level = %d, queue free space = %d\r\n", rxFIFOfillLevel, queueFreeSpace);
-        static FDCAN_RxHeaderTypeDef rxHeader;
-        static uint8_t rxData[payloadMaxSize];
-#ifdef SIMU_ENABLED
-        bool result{true};
-        --rxFIFOfillLevel;
-        rxHeader.Identifier = 0x00CE;
-        rxHeader.DataLength = 8;
-        rxHeader.IdType = FDCAN_STANDARD_ID;
-        rxHeader.FilterIndex = 99;
-#else
-        osKernelLock();
-        bool result{HAL_FDCAN_GetRxMessage(hfdcan, RxLocation, &rxHeader, rxData) == HAL_OK};
-        osKernelUnlock();
-#endif
-        if (result)
-        {
-            const uint32_t messageID{rxHeader.Identifier};
-            const uint8_t dataLength{static_cast<uint8_t>(rxHeader.DataLength)};
-            result = ((messageID != 0) && (dataLength != 0));
-            if (result)
-            {
-                const uint8_t filterID{static_cast<uint8_t>(rxHeader.FilterIndex)};
-                CMessage message = {
-                    .timestamp = HAL_GetTick(),
-                    .ID = messageID,
-                    .isExtended = (rxHeader.IdType == FDCAN_EXTENDED_ID),
-                    .channelID = channelID,
-                    .filterID = filterID,
-                    .length = dataLength
-                };
-                memcpy(message.payload, rxData, dataLength);
-                osMessageQueuePut(messageQueueHandle, &message, 0, 0);
-                queueFreeSpace = osMessageQueueGetSpace(messageQueueHandle);
-#ifndef SIMU_ENABLED
-                rxFIFOfillLevel = HAL_FDCAN_GetRxFifoFillLevel(hfdcan, RxLocation);
-#endif
-                returnResult = true;
-                log("readOutMessages(FDCAN%01d, 0x%02X): ID = 0x%04lX, size = 0x%02X:", channelID, filterID, messageID, dataLength);
-                for (uint32_t i = 0; i < dataLength; ++i)
-                {
-                    log("%s0x%02X", ((i == 0) ? " [" : ", "), rxData[i]);
-                }
-                log("]\r\n");
-            }
-            else
-            {
-                log("readOutMessages(FDCAN%01d, FIFO%01d): wrong ID or data length\r\n", channelID, ((RxLocation == FDCAN_RX_FIFO0) ? 0 : 1));
-            }
-        }
-        else
-        {
-            log("readOutMessages(FDCAN%01d, FIFO%01d): message read failure\r\n", channelID, ((RxLocation == FDCAN_RX_FIFO0) ? 0 : 1));
-        }
-    }
-    log("readOutMessages(): exit, RX FIFO fill Level = %d, queue free space = %d\r\n", rxFIFOfillLevel, queueFreeSpace);
-    return returnResult;
-}
-
-void StartReaderTask(void *argument)
-{
-    log("ReaderTask: start\r\n");
-    osDelay(100);
-
-    while (true)
-    {
-        // wait for any event from CAN1/CAN2 stored in FIFO0/FIFO1
-        log("ReaderTask: wait for event\r\n");
-        const auto eventID{osThreadFlagsWait((FDCAN2_FIFO1 | FDCAN2_FIFO0 | FDCAN1_FIFO1 | FDCAN1_FIFO0), osFlagsWaitAny, osWaitForever)};
-        log("ReaderTask: eventID received = %08X\r\n", eventID);
-        if ((eventID & osFlagsError) == osFlagsError)
-        {
-            log("ReaderTask: ERROR RECEIVED\r\n");
-            osDelay(10);
-        }
-        else
-        {
-            // read out messages accordingly and put them into message queue
-            bool toYield{0 == osMessageQueueGetSpace(messageQueueHandle)};
-            if (((eventID & FDCAN1_FIFO0) == FDCAN1_FIFO0) && !toYield)
-            {
-                toYield = (readOutMessages(&hfdcan1, FDCAN_RX_FIFO0) && (0 == osMessageQueueGetSpace(messageQueueHandle)));
-                log("ReaderTask: event received: FDCAN1_FIFO0, to store = %d\r\n", toYield);
-            }
-            if (((eventID & FDCAN1_FIFO1) == FDCAN1_FIFO1) && !toYield)
-            {
-                toYield = (readOutMessages(&hfdcan1, FDCAN_RX_FIFO1) && (0 == osMessageQueueGetSpace(messageQueueHandle)));
-                log("ReaderTask: event received: FDCAN1_FIFO1, to store = %d\r\n", toYield);
-            }
-            if (((eventID & FDCAN2_FIFO0) == FDCAN2_FIFO0) && !toYield)
-            {
-                toYield = (readOutMessages(&hfdcan2, FDCAN_RX_FIFO0) && (0 == osMessageQueueGetSpace(messageQueueHandle)));
-                log("ReaderTask: event received: FDCAN2_FIFO0, to store = %d\r\n", toYield);
-            }
-            if (((eventID & FDCAN2_FIFO1) == FDCAN2_FIFO1) && !toYield)
-            {
-                toYield = (readOutMessages(&hfdcan2, FDCAN_RX_FIFO1) && (0 == osMessageQueueGetSpace(messageQueueHandle)));
-                log("ReaderTask: event received: FDCAN2_FIFO1, to store = %d\r\n", toYield);
-            }
-            // yield if nothing read out from FIFOs or message queue is full
-            if (toYield)
-            {
-                log("ReaderTask: yield\r\n");
-                osDelay(1);
-            }
-        }
-    }
 }
 
 void mountSD()
@@ -279,7 +141,7 @@ void StartLoggerTask(void *argument)
     CMessage message;
     while (true)
     {
-        uint32_t messagesInQueue{osMessageQueueGetCount(messageQueueHandle)};
+        const uint32_t messagesInQueue{osMessageQueueGetCount(messageQueueHandle)};
         if (0 < messagesInQueue)
         {
             //       Time Stamp,      ID,Extended,Dir,Bus,LEN,D1,D2,D3,D4,D5,D6,D7,D8
@@ -310,34 +172,6 @@ void StartLoggerTask(void *argument)
         {
             log("LoggerTask: exit, messages in queue = %d\r\n", messagesInQueue);
             log("LoggerTask: yield\r\n");
-            osDelay(1);
-        }
-    }
-}
-
-void StartMonitorTask(void *argument)
-{
-    log("MonitorTask: start\r\n");
-    osDelay(200);
-
-    while (true)
-    {
-        log("\r\n"
-            "   MonitorTask: IRQ simu task status = %s\r\n"
-            "   MonitorTask:  monitor task status = %s\r\n"
-            "   MonitorTask:   reader task status = %s\r\n"
-            "   MonitorTask:   logger task status = %s\r\n"
-            "\r\n",
-                getString(osThreadGetState(IRQsimuTaskHandle)),
-                getString(osThreadGetState(      monitorTaskHandle)),
-                getString(osThreadGetState(       readerTaskHandle)),
-                getString(osThreadGetState(       loggerTaskHandle)));
-        osDelay(100);
-        static uint8_t counter{0};
-        if (++counter == 10)
-        {
-            counter = 0;
-            HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
         }
     }
 }
@@ -351,21 +185,46 @@ void StartIRQsimuTask(void *argument)
     {
         if (0 != osMessageQueueGetSpace(messageQueueHandle))
         {
-            osThreadFlagsSet(readerTaskHandle, FDCAN1_FIFO0);
+            readOutMessages(&hfdcan1, FDCAN_RX_FIFO0);
         }
         if (0 != osMessageQueueGetSpace(messageQueueHandle))
         {
-            osThreadFlagsSet(readerTaskHandle, FDCAN1_FIFO1);
+            readOutMessages(&hfdcan1, FDCAN_RX_FIFO1);
         }
         if (0 != osMessageQueueGetSpace(messageQueueHandle))
         {
-            osThreadFlagsSet(readerTaskHandle, FDCAN2_FIFO0);
+            readOutMessages(&hfdcan2, FDCAN_RX_FIFO0);
         }
         if (0 != osMessageQueueGetSpace(messageQueueHandle))
         {
-            osThreadFlagsSet(readerTaskHandle, FDCAN2_FIFO1);
+            readOutMessages(&hfdcan2, FDCAN_RX_FIFO1);
         }
         osDelay(1);
+    }
+}
+
+void StartMonitorTask(void *argument)
+{
+    log("MonitorTask: start\r\n");
+    osDelay(200);
+
+    while (true)
+    {
+        log("\r\n"
+            "   MonitorTask: IRQ simu task status = %s\r\n"
+            "   MonitorTask:  monitor task status = %s\r\n"
+            "   MonitorTask:   logger task status = %s\r\n"
+            "\r\n",
+                getString(osThreadGetState(IRQsimuTaskHandle)),
+                getString(osThreadGetState(monitorTaskHandle)),
+                getString(osThreadGetState( loggerTaskHandle)));
+        osDelay(100);
+        static uint8_t counter{0};
+        if (++counter == 10)
+        {
+            counter = 0;
+            HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
+        }
     }
 }
 
@@ -804,45 +663,100 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
 }
 
+bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
+{
+    const uint8_t channelID{static_cast<uint8_t>((hfdcan->Instance == FDCAN1) ? 1 : 2)};
+    bool returnResult{false};
+#ifdef SIMU_ENABLED
+    uint32_t rxFIFOfillLevel{3};
+#else
+    uint32_t rxFIFOfillLevel{HAL_FDCAN_GetRxFifoFillLevel(hfdcan, RxLocation)};
+#endif
+    uint32_t queueFreeSpace{osMessageQueueGetSpace(messageQueueHandle)};
+    while (
+           (0 < rxFIFOfillLevel)                                                        // if there is something to read out from CANs FIFOs
+           &&                                                                           // AND
+           (0 < queueFreeSpace)                                                         // there is free space in message queue to store data
+          )
+    {
+        log("readOutMessages(): RX FIFO fill Level = %d, queue free space = %d\r\n", rxFIFOfillLevel, queueFreeSpace);
+        static FDCAN_RxHeaderTypeDef rxHeader;
+        static uint8_t rxData[payloadMaxSize];
+#ifdef SIMU_ENABLED
+        bool result{true};
+        --rxFIFOfillLevel;
+        rxHeader.Identifier = 0x00CE;
+        rxHeader.DataLength = 8;
+        rxHeader.IdType = FDCAN_STANDARD_ID;
+        rxHeader.FilterIndex = 99;
+#else
+        bool result{HAL_FDCAN_GetRxMessage(hfdcan, RxLocation, &rxHeader, rxData) == HAL_OK};
+#endif
+        if (result)
+        {
+            const uint32_t messageID{rxHeader.Identifier};
+            const uint8_t dataLength{static_cast<uint8_t>(rxHeader.DataLength)};
+            result = ((messageID != 0) && (dataLength != 0));
+            if (result)
+            {
+                const uint8_t filterID{static_cast<uint8_t>(rxHeader.FilterIndex)};
+                CMessage message = {
+                    .timestamp = HAL_GetTick(),
+                    .ID = messageID,
+                    .isExtended = (rxHeader.IdType == FDCAN_EXTENDED_ID),
+                    .channelID = channelID,
+                    .filterID = filterID,
+                    .length = dataLength
+                };
+                memcpy(message.payload, rxData, dataLength);
+                osMessageQueuePut(messageQueueHandle, &message, 0, 0);
+                queueFreeSpace = osMessageQueueGetSpace(messageQueueHandle);
+#ifndef SIMU_ENABLED
+                rxFIFOfillLevel = HAL_FDCAN_GetRxFifoFillLevel(hfdcan, RxLocation);
+#endif
+                returnResult = true;
+                log("readOutMessages(FDCAN%01d, 0x%02X): ID = 0x%04lX, size = 0x%02X:", channelID, filterID, messageID, dataLength);
+                for (uint32_t i = 0; i < dataLength; ++i)
+                {
+                    log("%s0x%02X", ((i == 0) ? " [" : ", "), rxData[i]);
+                }
+                log("]\r\n");
+            }
+            else
+            {
+                log("readOutMessages(FDCAN%01d, FIFO%01d): wrong ID or data length\r\n", channelID, ((RxLocation == FDCAN_RX_FIFO0) ? 0 : 1));
+            }
+        }
+        else
+        {
+            log("readOutMessages(FDCAN%01d, FIFO%01d): message read failure\r\n", channelID, ((RxLocation == FDCAN_RX_FIFO0) ? 0 : 1));
+        }
+    }
+    log("readOutMessages(): exit, RX FIFO fill Level = %d, queue free space = %d\r\n", rxFIFOfillLevel, queueFreeSpace);
+    return returnResult;
+}
+
 void HAL_FDCAN_HighPriorityMessageCallback(FDCAN_HandleTypeDef *hfdcan)
 {
-    if (0 != osMessageQueueGetSpace(messageQueueHandle))
-    {
-        osThreadFlagsSet(readerTaskHandle, (hfdcan->Instance == FDCAN1) ? FDCAN1_FIFO0 : FDCAN2_FIFO0);
-        //log("HAL_FDCAN_HighPriorityMessageCallback\r\n");
-    }
+    readOutMessages(hfdcan, FDCAN_RX_FIFO0);
+    //log("HAL_FDCAN_HighPriorityMessageCallback\r\n");
 }
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
-    if (
-        ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == FDCAN_IT_RX_FIFO0_NEW_MESSAGE) &&
-        (0 != osMessageQueueGetSpace(messageQueueHandle))
-       )
+    if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == FDCAN_IT_RX_FIFO0_NEW_MESSAGE)
     {
-        osThreadFlagsSet(readerTaskHandle, (hfdcan->Instance == FDCAN1) ? FDCAN1_FIFO0 : FDCAN2_FIFO0);
+        readOutMessages(hfdcan, FDCAN_RX_FIFO0);
         //log("HAL_FDCAN_RxFifo0Callback: RxFifo0ITs = %04lX\r\n", RxFifo0ITs);
     }
 }
 
 void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
 {
-    if (
-        ((RxFifo1ITs & FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == FDCAN_IT_RX_FIFO1_NEW_MESSAGE) &&
-        (0 != osMessageQueueGetSpace(messageQueueHandle))
-       )
+    if ((RxFifo1ITs & FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == FDCAN_IT_RX_FIFO1_NEW_MESSAGE)
     {
-        osThreadFlagsSet(readerTaskHandle, (hfdcan->Instance == FDCAN1) ? FDCAN1_FIFO1 : FDCAN2_FIFO1);
+        readOutMessages(hfdcan, FDCAN_RX_FIFO1);
         //log("HAL_FDCAN_RxFifo1Callback: RxFifo1ITs = %04lX\r\n", RxFifo1ITs);
-    }
-}
-
-extern "C"
-{
-    int __io_putchar(int ch)
-    {
-        HAL_UART_Transmit(&hlpuart1, (uint8_t*) &ch, 1, HAL_MAX_DELAY);
-        return ch;
     }
 }
 
