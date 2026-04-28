@@ -73,6 +73,9 @@ volatile bool isReadyToSend{false};
 volatile bool isLogRenamed{false};
 volatile uint16_t hour{0}, minute{0}, second{0}, day{1}, month{1}, year{26};
 
+volatile uint16_t rxFIFO0IRQHPcounter{0}, rxFIFO0IRQcounter{0}, rxFIFO1IRQcounter{0}, rxFIFO0messageCounter{0}, rxFIFO1messageCounter{0};
+volatile uint16_t _rxFIFO0IRQHPcounter{0}, _rxFIFO0IRQcounter{0}, _rxFIFO1IRQcounter{0}, _rxFIFO0messageCounter{0}, _rxFIFO1messageCounter{0};
+
 int main(void)
 {
     HAL_Init();
@@ -340,9 +343,9 @@ uint32_t getField(const uint16_t LSB, const uint16_t sizeInBits, const uint8_t *
 
 void switchLEDs()
 {
-    static uint8_t messageCounter{0};
-    HAL_GPIO_WritePin(GPIOB,                    (GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5), GPIO_PIN_SET  );
-    HAL_GPIO_WritePin(GPIOB, ++messageCounter & (GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5), GPIO_PIN_RESET);
+    static uint16_t messageCounter{0};
+    HAL_GPIO_WritePin(GPIOB,                           (GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5), GPIO_PIN_SET  );
+    HAL_GPIO_WritePin(GPIOB, (++messageCounter >> 4) & (GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5), GPIO_PIN_RESET);
 }
 
 void createLog()
@@ -520,6 +523,33 @@ void saveData(const uint32_t timestamp, const uint32_t ID, const bool isExtended
     }
     f_printf(&USERFile, "\n");
     timestampPrevious = timestamp;
+
+    if (counter == 0)
+    {
+        __disable_irq();
+            _rxFIFO0IRQHPcounter = rxFIFO0IRQHPcounter;
+            _rxFIFO0IRQcounter = rxFIFO0IRQcounter;
+            _rxFIFO1IRQcounter = rxFIFO1IRQcounter;
+            _rxFIFO0messageCounter = rxFIFO0messageCounter;
+            _rxFIFO1messageCounter = rxFIFO1messageCounter;
+        __enable_irq();
+        f_printf(&USERFile, "%08d%02d0,00000000,false,Tx,000,2,%02X,%02X\n",
+            timestamp,
+            counter,
+            (_rxFIFO0IRQHPcounter &  0xFF),
+            (_rxFIFO0IRQHPcounter >> 0x08));
+        f_printf(&USERFile, "%08d%02d0,00000001,false,Tx,001,8,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\n",
+            timestamp,
+            counter,
+            (_rxFIFO0IRQcounter &  0xFF),
+            (_rxFIFO0IRQcounter >> 0x08),
+            (_rxFIFO1IRQcounter &  0xFF),
+            (_rxFIFO1IRQcounter >> 0x08),
+            (_rxFIFO0messageCounter &  0xFF),
+            (_rxFIFO0messageCounter >> 0x08),
+            (_rxFIFO1messageCounter &  0xFF),
+            (_rxFIFO1messageCounter >> 0x08));
+    }
 }
 
 void diagnosticController(const uint32_t timestamp, uint32_t ID, bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, uint8_t length, uint8_t *payload)
@@ -715,6 +745,14 @@ bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
                 rxFIFOfillLevel = HAL_FDCAN_GetRxFifoFillLevel(hfdcan, RxLocation);
 #endif
                 returnResult = true;
+                if (channelID == 1)
+                {
+                    ++rxFIFO0messageCounter;
+                }
+                else
+                {
+                    ++rxFIFO1messageCounter;
+                }
                 log("readOutMessages(FDCAN%01d, 0x%02X): ID = 0x%04lX, size = 0x%02X:", channelID, filterID, messageID, dataLength);
                 for (uint32_t i = 0; i < dataLength; ++i)
                 {
@@ -738,16 +776,18 @@ bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
 
 void HAL_FDCAN_HighPriorityMessageCallback(FDCAN_HandleTypeDef *hfdcan)
 {
-    readOutMessages(hfdcan, FDCAN_RX_FIFO0);
+    ++rxFIFO0IRQHPcounter;
     //log("HAL_FDCAN_HighPriorityMessageCallback\r\n");
+    readOutMessages(hfdcan, FDCAN_RX_FIFO0);
 }
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
     if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == FDCAN_IT_RX_FIFO0_NEW_MESSAGE)
     {
-        readOutMessages(hfdcan, FDCAN_RX_FIFO0);
+        ++rxFIFO0IRQcounter;
         //log("HAL_FDCAN_RxFifo0Callback: RxFifo0ITs = %04lX\r\n", RxFifo0ITs);
+        readOutMessages(hfdcan, FDCAN_RX_FIFO0);
     }
 }
 
@@ -755,8 +795,9 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
 {
     if ((RxFifo1ITs & FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == FDCAN_IT_RX_FIFO1_NEW_MESSAGE)
     {
-        readOutMessages(hfdcan, FDCAN_RX_FIFO1);
+        ++rxFIFO1IRQcounter;
         //log("HAL_FDCAN_RxFifo1Callback: RxFifo1ITs = %04lX\r\n", RxFifo1ITs);
+        readOutMessages(hfdcan, FDCAN_RX_FIFO1);
     }
 }
 
