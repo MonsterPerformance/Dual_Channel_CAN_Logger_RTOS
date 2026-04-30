@@ -13,6 +13,7 @@ extern "C"
 }
 
 //#define SIMU_ENABLED
+//#define STATISTICS_ENABLED
 #define SENDER_ENABLED
 
 osThreadId_t loggerTaskHandle;
@@ -73,8 +74,7 @@ volatile bool isReadyToSend{false};
 volatile bool isLogRenamed{false};
 volatile uint16_t hour{0}, minute{0}, second{0}, day{1}, month{1}, year{26};
 
-volatile uint16_t rxFIFO0IRQHPcounter{0}, rxFIFO0IRQcounter{0}, rxFIFO1IRQcounter{0}, rxFIFO0messageCounter{0}, rxFIFO1messageCounter{0};
-volatile uint16_t _rxFIFO0IRQHPcounter{0}, _rxFIFO0IRQcounter{0}, _rxFIFO1IRQcounter{0}, _rxFIFO0messageCounter{0}, _rxFIFO1messageCounter{0};
+volatile uint32_t rxFIFO0IRQHPcounter{0}, rxFIFO0IRQcounter{0}, rxFIFO1IRQcounter{0}, rxFIFO0messageCounter{0}, rxFIFO1messageCounter{0};
 
 int main(void)
 {
@@ -506,8 +506,8 @@ void updateDateAndTime(const uint32_t ID, const uint8_t *data)
 void saveData(const uint32_t timestamp, const uint32_t ID, const bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, const uint8_t length, const uint8_t *payload)
 {
     static uint16_t counter{0};
-    static uint16_t timestampPrevious{0};
-    counter = ((timestampPrevious == timestamp) ? (counter + 1) : 0);
+    static uint32_t timestampPreviousMessage{0};
+    counter = ((timestampPreviousMessage == timestamp) ? (counter + 1) : 0);
     f_printf(&USERFile, "%08d%02d0,%08X,%s,%s,%d%02d,%lu",
             timestamp,
             counter,
@@ -522,10 +522,15 @@ void saveData(const uint32_t timestamp, const uint32_t ID, const bool isExtended
         f_printf(&USERFile, ",%02X", payload[i]);
     }
     f_printf(&USERFile, "\n");
-    timestampPrevious = timestamp;
+    timestampPreviousMessage = timestamp;
 
-    if (counter == 0)
+#ifdef STATISTICS_ENABLED
+    static const uint32_t periodToSaveStatistics{1000};         // in micros
+    static uint32_t timestampPreviousStatistics{0};
+    if (periodToSaveStatistics <= (timestamp - timestampPreviousStatistics))
     {
+        timestampPreviousStatistics = timestamp;
+        static uint32_t _rxFIFO0IRQHPcounter{0}, _rxFIFO0IRQcounter{0}, _rxFIFO1IRQcounter{0}, _rxFIFO0messageCounter{0}, _rxFIFO1messageCounter{0};
         __disable_irq();
             _rxFIFO0IRQHPcounter = rxFIFO0IRQHPcounter;
             _rxFIFO0IRQcounter = rxFIFO0IRQcounter;
@@ -533,23 +538,43 @@ void saveData(const uint32_t timestamp, const uint32_t ID, const bool isExtended
             _rxFIFO0messageCounter = rxFIFO0messageCounter;
             _rxFIFO1messageCounter = rxFIFO1messageCounter;
         __enable_irq();
-        f_printf(&USERFile, "%08d%02d0,00000000,false,Tx,000,2,%02X,%02X\n",
+        f_printf(&USERFile, "%08d%02d0,00000000,false,Tx,000,4,%02X,%02X,%02X,%02X\n",
             timestamp,
             counter,
-            (_rxFIFO0IRQHPcounter &  0xFF),
-            (_rxFIFO0IRQHPcounter >> 0x08));
-        f_printf(&USERFile, "%08d%02d0,00000001,false,Tx,001,8,%02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\n",
+            ((_rxFIFO0IRQHPcounter >> 0x00) & 0xFF),
+            ((_rxFIFO0IRQHPcounter >> 0x08) & 0xFF),
+            ((_rxFIFO0IRQHPcounter >> 0x10) & 0xFF),
+            ((_rxFIFO0IRQHPcounter >> 0x18) & 0xFF));
+        f_printf(&USERFile, "%08d%02d0,00000000,false,Tx,001,4,%02X,%02X,%02X,%02X\n",
             timestamp,
             counter,
-            (_rxFIFO0IRQcounter &  0xFF),
-            (_rxFIFO0IRQcounter >> 0x08),
-            (_rxFIFO1IRQcounter &  0xFF),
-            (_rxFIFO1IRQcounter >> 0x08),
-            (_rxFIFO0messageCounter &  0xFF),
-            (_rxFIFO0messageCounter >> 0x08),
-            (_rxFIFO1messageCounter &  0xFF),
-            (_rxFIFO1messageCounter >> 0x08));
+            ((_rxFIFO0IRQcounter >> 0x00) & 0xFF),
+            ((_rxFIFO0IRQcounter >> 0x08) & 0xFF),
+            ((_rxFIFO0IRQcounter >> 0x10) & 0xFF),
+            ((_rxFIFO0IRQcounter >> 0x18) & 0xFF));
+        f_printf(&USERFile, "%08d%02d0,00000000,false,Tx,002,4,%02X,%02X,%02X,%02X\n",
+            timestamp,
+            counter,
+            ((_rxFIFO1IRQcounter >> 0x00) & 0xFF),
+            ((_rxFIFO1IRQcounter >> 0x08) & 0xFF),
+            ((_rxFIFO1IRQcounter >> 0x10) & 0xFF),
+            ((_rxFIFO1IRQcounter >> 0x18) & 0xFF));
+        f_printf(&USERFile, "%08d%02d0,00000000,false,Tx,011,4,%02X,%02X,%02X,%02X\n",
+            timestamp,
+            counter,
+            ((_rxFIFO0messageCounter >> 0x00) & 0xFF),
+            ((_rxFIFO0messageCounter >> 0x08) & 0xFF),
+            ((_rxFIFO0messageCounter >> 0x10) & 0xFF),
+            ((_rxFIFO0messageCounter >> 0x18) & 0xFF));
+        f_printf(&USERFile, "%08d%02d0,00000000,false,Tx,012,4,%02X,%02X,%02X,%02X\n",
+            timestamp,
+            counter,
+            ((_rxFIFO1messageCounter >> 0x00) & 0xFF),
+            ((_rxFIFO1messageCounter >> 0x08) & 0xFF),
+            ((_rxFIFO1messageCounter >> 0x10) & 0xFF),
+            ((_rxFIFO1messageCounter >> 0x18) & 0xFF));
     }
+#endif
 }
 
 void diagnosticController(const uint32_t timestamp, uint32_t ID, bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, uint8_t length, uint8_t *payload)
