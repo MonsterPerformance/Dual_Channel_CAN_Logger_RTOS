@@ -94,12 +94,14 @@ int main(void)
     HAL_Delay(100);
 
 #ifdef DEBUG
-    printf("\r\n\r\n\r\n  DEBUG  \r\n\r\n\r\n");
+    printf("\r\n\r\n\r\n  DEBUG  (RTOS) \r\n\r\n\r\n");
 #else
-    printf("\r\n\r\n\r\n RELEASE \r\n\r\n\r\n");
+    printf("\r\n\r\n\r\n RELEASE (RTOS) \r\n\r\n\r\n");
 #endif
 
     HAL_GPIO_WritePin(GPIOB, (GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7), GPIO_PIN_SET);
+
+    uwTick = 0;
 
 	osKernelInitialize();
 
@@ -139,7 +141,6 @@ void StartLoggerTask(void *argument)
 {
     log("LoggerTask: start\r\n");
     mountSD();
-    osDelay(200);
 
     CMessage message;
     while (true)
@@ -182,7 +183,6 @@ void StartLoggerTask(void *argument)
 void StartIRQsimuTask(void *argument)
 {
     log("IRQsimuTask: start\r\n");
-    osDelay(700);
 
     while (true)
     {
@@ -209,7 +209,6 @@ void StartIRQsimuTask(void *argument)
 void StartMonitorTask(void *argument)
 {
     log("MonitorTask: start\r\n");
-    osDelay(200);
 
     while (true)
     {
@@ -221,13 +220,8 @@ void StartMonitorTask(void *argument)
                 getString(osThreadGetState(IRQsimuTaskHandle)),
                 getString(osThreadGetState(monitorTaskHandle)),
                 getString(osThreadGetState( loggerTaskHandle)));
-        osDelay(100);
-        static uint8_t counter{0};
-        if (++counter == 10)
-        {
-            counter = 0;
-            HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
-        }
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
+        osDelay(1000);
     }
 }
 
@@ -381,19 +375,19 @@ void createLog()
 
 void renameLog()
 {
-    char FileName[] = {"DD_MM_YY/hh_mm_ss.CSV"};
+    char FileName[] = {"DDMMYYRT/HHMMSSRT.CSV"};
     FileName[ 0] = '0' + (day / 10);
     FileName[ 1] = '0' + (day % 10);
-    FileName[ 3] = '0' + (month / 10);
-    FileName[ 4] = '0' + (month % 10);
-    FileName[ 6] = '0' + (year / 10);
-    FileName[ 7] = '0' + (year % 10);
+    FileName[ 2] = '0' + (month / 10);
+    FileName[ 3] = '0' + (month % 10);
+    FileName[ 4] = '0' + (year / 10);
+    FileName[ 5] = '0' + (year % 10);
     FileName[ 9] = '0' + (hour / 10);
     FileName[10] = '0' + (hour % 10);
-    FileName[12] = '0' + (minute / 10);
-    FileName[13] = '0' + (minute % 10);
-    FileName[15] = '0' + (second / 10);
-    FileName[16] = '0' + (second % 10);
+    FileName[11] = '0' + (minute / 10);
+    FileName[12] = '0' + (minute % 10);
+    FileName[13] = '0' + (second / 10);
+    FileName[14] = '0' + (second % 10);
     FileName[8] = 0;
     DIR targetDirectory;
     FRESULT result{f_opendir(&targetDirectory, FileName)};
