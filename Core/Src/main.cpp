@@ -55,10 +55,11 @@ uint32_t getField(const uint16_t LSB, const uint16_t sizeInBits, const uint8_t *
 void switchLEDs();
 void createLog();
 void renameLog();
+void processMessage(CMessage& message);
 void updateDateAndTime(const uint32_t ID, const uint8_t *data);
 void saveData(const uint32_t timestamp, const uint32_t ID, const bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, const uint8_t length, const uint8_t *payload);
-void diagnosticController(const uint32_t timestamp, uint32_t ID, bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, uint8_t length, uint8_t *payload);
-void processMessage(CMessage& message);
+void RQcontroller();
+void RPcontroller(const uint32_t timestamp, uint32_t ID, bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, uint8_t length, uint8_t *payload);
 bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation);
 template <typename... Ts>
 void trace(FIL& logFile, const char *value, Ts... values);
@@ -70,8 +71,9 @@ const char systemLogName[] = {"DEBUG.TXT"};
 FIL systemLogFile;
 volatile bool toFlushData{false};
 volatile bool isDateReady{false};
-volatile bool isReadyToSend{false};
 volatile bool isLogRenamed{false};
+volatile bool isSenderEnabled{false};
+volatile bool gotResponse{false};
 volatile uint16_t hour{0}, minute{0}, second{0}, day{1}, month{1}, year{26};
 
 volatile uint32_t rxFIFO0IRQHPcounter{0}, rxFIFO0IRQcounter{0}, rxFIFO1IRQcounter{0}, rxFIFO0messageCounter{0}, rxFIFO1messageCounter{0};
@@ -227,20 +229,27 @@ void StartMonitorTask(void *argument)
 
 void Timer10msCallback(void *argument)
 {
-    static const uint16_t msCounterToSendThreshold{1};                        // period in ms to send requests
-    static const uint16_t msCounterToFlushThreshold{100};                     // period in ms to flush data
+    static const uint16_t msCounterToSendThreshold{1};                            // period in x10 ms to send requests
+    static const uint16_t msCounterToFlushThreshold{1000};                        // period in x10 ms to flush data
     static uint16_t msCounterToSend{0};
     static uint16_t msCounterToFlush{0};
-    if (msCounterToSendThreshold <= ++msCounterToSend)
+    if (msCounterToSendThreshold == ++msCounterToSend)
     {
         msCounterToSend = 0;
-        isReadyToSend = true;
+        static uint8_t counter{0};
+        if (10 == ++counter)
+        {
+            counter = 0;
+            HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
+        }
+#ifdef SENDER_ENABLED
+        RQcontroller();
+#endif
     }
-    if (msCounterToFlushThreshold <= ++msCounterToFlush)
+    if (msCounterToFlushThreshold == ++msCounterToFlush)
     {
         msCounterToFlush = 0;
         toFlushData = true;
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
         log("HAL_TIM_PeriodElapsedCallback: toFlushData\r\n");
     }
 }
@@ -571,79 +580,9 @@ void saveData(const uint32_t timestamp, const uint32_t ID, const bool isExtended
 #endif
 }
 
-void diagnosticController(const uint32_t timestamp, uint32_t ID, bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, uint8_t length, uint8_t *payload)
+void RQcontroller()
 {
-#ifdef SENDER_ENABLED
-    // diagnostic response controller
-    static bool isRequesterEnabled{false};
-    static bool gotResponse{false};
-    static uint8_t senderID{0};
-    if (ID == 0x00AA)
-    {
-        isRequesterEnabled = (300 < getField(34, 14, payload));    // RPM is non-zero
-    }
-    else if (ID == 0x0612)
-    {
-        if (      // EGT response
-            (payload[0] == 0xF1) &&
-            (payload[1] == 0x04) &&
-            (payload[2] == 0x41) &&
-            (payload[3] == 0x3C)
-           )
-        {
-            ID = 0x7F0;
-            length = 8;
-            payload[7] = senderID;
-            gotResponse = true;
-        }
-        else if ( // IAT response
-                 (payload[0] == 0xF1) &&
-                 (payload[1] == 0x03) &&
-                 (payload[2] == 0x41) &&
-                 (payload[3] == 0x0F)
-                )
-        {
-            ID = 0x7F3;
-            length = 8;
-            payload[7] = senderID;
-            gotResponse = true;
-        }
-        else if ( // CAP response
-                 (payload[0] == 0xF1) &&
-                 (payload[1] == 0x04) &&
-                 (payload[2] == 0x6C) &&
-                 (payload[3] == 0x10) &&
-                 (senderID == 1)
-                )
-        {
-            ID = 0x7F1;
-            length = 8;
-            payload[7] = senderID;
-            gotResponse = true;
-        }
-        else if ( // CAT response
-                 (payload[0] == 0xF1) &&
-                 (payload[1] == 0x04) &&
-                 (payload[2] == 0x6C) &&
-                 (payload[3] == 0x10) &&
-                 (senderID == 3)
-                )
-        {
-            ID = 0x7F4;
-            length = 8;
-            payload[7] = senderID;
-            gotResponse = true;
-        }
-    }
-
-    // 1744555446303341,000007xx,false,Rx,0,8,7F,0E,64,00,02,00,00,10
-    if (gotResponse)
-    {
-        saveData(timestamp, ID, isExtended, "Rx", channelID, filterID, length, payload);
-    }
-
-    // diagnostic request controller
-    if (isRequesterEnabled && isReadyToSend)
+    if (isSenderEnabled)
     {
         struct SizeAndData
         {
@@ -652,42 +591,62 @@ void diagnosticController(const uint32_t timestamp, uint32_t ID, bool isExtended
         };
         static const SizeAndData dataToSend[] =
         {
-            {4, {0x12, 0x02, 0x01, 0x3C, 0x00, 0x00, 0x00, 0x00}},                   // OBD2_EGT: F1 04 41 3C AA BB
-            {6, {0x12, 0x04, 0x2C, 0x10, 0x07, 0x6D, 0x00, 0x00}},                   //      CAP: F1 04 6C 10 ZZ zz 55 55
-            {4, {0x12, 0x02, 0x01, 0x0F, 0x00, 0x00, 0x00, 0x00}},                   // OBD2_IAT: F1 03 41 0F AA
-            {6, {0x12, 0x04, 0x2C, 0x10, 0x07, 0x6F, 0x00, 0x00}},                   //      CAT: F1 04 6C 10 YY yy 55 55
+            {5, {0x12, 0x03, 0x01, 0x3C, 0x0F, 0x00, 0x00, 0x00}}                                                               // EGT&IAT: 12 03 01 3C 0F
+            ,
+            {8, {0x12, 0x06, 0x2C, 0x10, 0x07, 0x6D, 0x07, 0x6F}}                                                               // CAP&CAT: 12 06 2C 10 07 6D 07 6F
         };
         static const uint8_t senderIDmax{sizeof(dataToSend) / sizeof(dataToSend[0])};
+        static uint8_t senderID{0};
 
         if (gotResponse)
         {
-            ++senderID;
-            if (senderIDmax <= senderID)
+            gotResponse = false;
+            if (senderIDmax == ++senderID)
             {
                 senderID = 0;
             }
-            gotResponse = false;
         }
 
-        FDCAN_TxHeaderTypeDef pTxHeader;
-        pTxHeader.Identifier = 0x06F1;
-        pTxHeader.IdType = FDCAN_STANDARD_ID;
-        pTxHeader.TxFrameType = FDCAN_DATA_FRAME;
-        pTxHeader.DataLength = dataToSend[senderID].size;
-        pTxHeader.ErrorStateIndicator = FDCAN_ESI_PASSIVE;
-        pTxHeader.BitRateSwitch = FDCAN_BRS_OFF;
-        pTxHeader.FDFormat = FDCAN_CLASSIC_CAN;
-        pTxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-        pTxHeader.MessageMarker = 0;
+        const FDCAN_TxHeaderTypeDef pTxHeader = {
+            .Identifier = static_cast<uint32_t>(0x06F1 + senderID),
+            .IdType = FDCAN_STANDARD_ID,
+            .TxFrameType = FDCAN_DATA_FRAME,
+            .DataLength = dataToSend[senderID].size,
+            .ErrorStateIndicator = FDCAN_ESI_PASSIVE,
+            .BitRateSwitch = FDCAN_BRS_OFF,
+            .FDFormat = FDCAN_CLASSIC_CAN,
+            .TxEventFifoControl = FDCAN_NO_TX_EVENTS,
+            .MessageMarker = 0
+        };
         HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &pTxHeader, dataToSend[senderID].data);
-        isReadyToSend = false;
 
-        ID = pTxHeader.Identifier;
-        isExtended = pTxHeader.IdType;
-        length = pTxHeader.DataLength;
-        saveData(timestamp, ID, isExtended, "Tx", 1, filterID, length, dataToSend[senderID].data);
+        CMessage message = {
+            .timestamp = HAL_GetTick(),
+            .ID = pTxHeader.Identifier,
+            .isExtended = false,
+            .channelID = 1,
+            .filterID = 99,
+            .length = static_cast<uint8_t>(pTxHeader.DataLength)
+        };
+        memcpy(message.payload, dataToSend[senderID].data, pTxHeader.DataLength);
+        osMessageQueuePut(messageQueueHandle, &message, 0, 20);
     }
-#endif
+}
+
+void RPcontroller(const uint32_t timestamp, uint32_t ID, bool isExtended, const char *dir, const uint8_t channelID, const uint8_t filterID, uint8_t length, uint8_t *payload)
+{
+    if (
+        (ID == 0x0612) &&
+        (
+         ((payload[0] == 0xF1) && (payload[1] == 0x06) && (payload[2] == 0x41) && (payload[3] == 0x3C) && (payload[6] == 0x0F)) // EGT&IAT: F1 06 41 3C AA aa 0F BB
+         ||
+         ((payload[0] == 0xF2) && (payload[1] == 0x06) && (payload[2] == 0x6C) && (payload[3] == 0x10))                         // CAP&CAT: F2 06 6C 10 AA aa BB bb
+        )
+       )
+    {
+        saveData(timestamp, (0x0700 | payload[0]), isExtended, "Rx", channelID, filterID, length, payload);
+        gotResponse = true;
+    }
 }
 
 void processMessage(CMessage& message)
@@ -699,9 +658,13 @@ void processMessage(CMessage& message)
     const auto filterID{message.filterID};
     const auto length{message.length};
     const auto payload{message.payload};
+    const bool isDiagnosticRequest{(0x06F1 <= ID) && (ID <= 0x06FF)};
+    isSenderEnabled = (!isSenderEnabled && (ID == 0x00AA) && (300 < getField(34, 14, payload)));                                // RPM is non-zero
     updateDateAndTime(ID, payload);
-    saveData(timestamp, ID, isExtended, "Rx", channelID, filterID, length, payload);
-    diagnosticController(timestamp, ID, isExtended, "Rx", channelID, filterID, length, payload);
+    saveData(timestamp, ID, isExtended, (isDiagnosticRequest ? "Tx" : "Rx"), channelID, filterID, length, payload);
+#ifdef SENDER_ENABLED
+    RPcontroller(timestamp, ID, isExtended, "Rx", channelID, filterID, length, payload);
+#endif
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -796,7 +759,6 @@ bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
 void HAL_FDCAN_HighPriorityMessageCallback(FDCAN_HandleTypeDef *hfdcan)
 {
     ++rxFIFO0IRQHPcounter;
-    //log("HAL_FDCAN_HighPriorityMessageCallback\r\n");
     readOutMessages(hfdcan, FDCAN_RX_FIFO0);
 }
 
@@ -805,7 +767,6 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == FDCAN_IT_RX_FIFO0_NEW_MESSAGE)
     {
         ++rxFIFO0IRQcounter;
-        //log("HAL_FDCAN_RxFifo0Callback: RxFifo0ITs = %04lX\r\n", RxFifo0ITs);
         readOutMessages(hfdcan, FDCAN_RX_FIFO0);
     }
 }
@@ -815,7 +776,6 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
     if ((RxFifo1ITs & FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == FDCAN_IT_RX_FIFO1_NEW_MESSAGE)
     {
         ++rxFIFO1IRQcounter;
-        //log("HAL_FDCAN_RxFifo1Callback: RxFifo1ITs = %04lX\r\n", RxFifo1ITs);
         readOutMessages(hfdcan, FDCAN_RX_FIFO1);
     }
 }
