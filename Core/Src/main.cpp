@@ -76,7 +76,9 @@ volatile bool isSenderEnabled{false};
 volatile bool gotResponse{false};
 volatile uint16_t hour{0}, minute{0}, second{0}, day{1}, month{1}, year{26};
 
+#ifdef STATISTICS_ENABLED
 volatile uint32_t rxFIFO0IRQHPcounter{0}, rxFIFO0IRQcounter{0}, rxFIFO1IRQcounter{0}, rxFIFO0messageCounter{0}, rxFIFO1messageCounter{0};
+#endif
 
 int main(void)
 {
@@ -229,10 +231,9 @@ void StartMonitorTask(void *argument)
 
 void Timer10msCallback(void *argument)
 {
+#ifdef SENDER_ENABLED
     static const uint16_t msCounterToSendThreshold{1};                            // period in x10 ms to send requests
-    static const uint16_t msCounterToFlushThreshold{1000};                        // period in x10 ms to flush data
     static uint16_t msCounterToSend{0};
-    static uint16_t msCounterToFlush{0};
     if (msCounterToSendThreshold == ++msCounterToSend)
     {
         msCounterToSend = 0;
@@ -242,10 +243,11 @@ void Timer10msCallback(void *argument)
             counter = 0;
             HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
         }
-#ifdef SENDER_ENABLED
         RQcontroller();
-#endif
     }
+#endif
+    static const uint16_t msCounterToFlushThreshold{1000};                        // period in x10 ms to flush data
+    static uint16_t msCounterToFlush{0};
     if (msCounterToFlushThreshold == ++msCounterToFlush)
     {
         msCounterToFlush = 0;
@@ -607,29 +609,18 @@ void RQcontroller()
             }
         }
 
-        const FDCAN_TxHeaderTypeDef pTxHeader = {
-            .Identifier = static_cast<uint32_t>(0x06F1 + senderID),
+        static FDCAN_TxHeaderTypeDef pTxHeader = {
             .IdType = FDCAN_STANDARD_ID,
             .TxFrameType = FDCAN_DATA_FRAME,
-            .DataLength = dataToSend[senderID].size,
             .ErrorStateIndicator = FDCAN_ESI_PASSIVE,
             .BitRateSwitch = FDCAN_BRS_OFF,
             .FDFormat = FDCAN_CLASSIC_CAN,
             .TxEventFifoControl = FDCAN_NO_TX_EVENTS,
             .MessageMarker = 0
         };
+        pTxHeader.Identifier = static_cast<uint32_t>(0x06F1 + senderID);
+        pTxHeader.DataLength = dataToSend[senderID].size;
         HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &pTxHeader, dataToSend[senderID].data);
-
-        CMessage message = {
-            .timestamp = HAL_GetTick(),
-            .ID = pTxHeader.Identifier,
-            .isExtended = false,
-            .channelID = 1,
-            .filterID = 99,
-            .length = static_cast<uint8_t>(pTxHeader.DataLength)
-        };
-        memcpy(message.payload, dataToSend[senderID].data, pTxHeader.DataLength);
-        osMessageQueuePut(messageQueueHandle, &message, 0, 20);
     }
 }
 
@@ -658,10 +649,16 @@ void processMessage(CMessage& message)
     const auto filterID{message.filterID};
     const auto length{message.length};
     const auto payload{message.payload};
-    const bool isDiagnosticRequest{(0x06F1 <= ID) && (ID <= 0x06FF)};
-    isSenderEnabled = (!isSenderEnabled && (ID == 0x00AA) && (300 < getField(34, 14, payload)));                                // RPM is non-zero
+    if (!isSenderEnabled && (ID == 0x00AA) && (300 < getField(34, 14, payload)))
+    {
+        isSenderEnabled = true;    // RPM is non-zero
+    }
     updateDateAndTime(ID, payload);
-    saveData(timestamp, ID, isExtended, (isDiagnosticRequest ? "Tx" : "Rx"), channelID, filterID, length, payload);
+	if (ID != 0x0612)
+    {
+        const bool isDiagnosticRequest{(0x06F1 <= ID) && (ID <= 0x06FF)};
+        saveData(timestamp, ID, isExtended, (isDiagnosticRequest ? "Tx" : "Rx"), channelID, filterID, length, payload);
+    }
 #ifdef SENDER_ENABLED
     RPcontroller(timestamp, ID, isExtended, "Rx", channelID, filterID, length, payload);
 #endif
@@ -727,6 +724,7 @@ bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
                 rxFIFOfillLevel = HAL_FDCAN_GetRxFifoFillLevel(hfdcan, RxLocation);
 #endif
                 returnResult = true;
+#ifdef STATISTICS_ENABLED
                 if (channelID == 1)
                 {
                     ++rxFIFO0messageCounter;
@@ -735,6 +733,7 @@ bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
                 {
                     ++rxFIFO1messageCounter;
                 }
+#endif
                 log("readOutMessages(FDCAN%01d, 0x%02X): ID = 0x%04lX, size = 0x%02X:", channelID, filterID, messageID, dataLength);
                 for (uint32_t i = 0; i < dataLength; ++i)
                 {
@@ -758,7 +757,9 @@ bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocation)
 
 void HAL_FDCAN_HighPriorityMessageCallback(FDCAN_HandleTypeDef *hfdcan)
 {
+#ifdef STATISTICS_ENABLED
     ++rxFIFO0IRQHPcounter;
+#endif
     readOutMessages(hfdcan, FDCAN_RX_FIFO0);
 }
 
@@ -766,7 +767,9 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
     if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == FDCAN_IT_RX_FIFO0_NEW_MESSAGE)
     {
+#ifdef STATISTICS_ENABLED
         ++rxFIFO0IRQcounter;
+#endif
         readOutMessages(hfdcan, FDCAN_RX_FIFO0);
     }
 }
@@ -775,7 +778,9 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
 {
     if ((RxFifo1ITs & FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == FDCAN_IT_RX_FIFO1_NEW_MESSAGE)
     {
+#ifdef STATISTICS_ENABLED
         ++rxFIFO1IRQcounter;
+#endif
         readOutMessages(hfdcan, FDCAN_RX_FIFO1);
     }
 }
