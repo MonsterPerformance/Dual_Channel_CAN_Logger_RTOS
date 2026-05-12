@@ -13,7 +13,7 @@ extern "C"
 }
 
 template <typename... Ts>
-void log(const char *value, Ts... values)
+inline void log(const char *value, Ts... values)
 {
     //printf(value, values...);
 }
