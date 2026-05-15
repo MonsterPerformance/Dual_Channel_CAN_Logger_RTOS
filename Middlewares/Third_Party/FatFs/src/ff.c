@@ -1822,7 +1822,7 @@ void gen_numname (
 		ns[i--] = c;
 		seq /= 16;
 	} while (seq);
-	ns[i] = '~';
+	if (i < 8) ns[i] = '~';
 
 	/* Append the number */
 	for (j = 0; j < i && dst[j] != ' '; j++) {

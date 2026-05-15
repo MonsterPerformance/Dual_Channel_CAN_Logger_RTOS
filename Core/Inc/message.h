@@ -4,7 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define payloadMaxSize 8
+const uint8_t BUFFERSIZE{64U};
+
 typedef struct
 {
     uint32_t timestamp;
@@ -13,7 +14,7 @@ typedef struct
      uint8_t channelID;
      uint8_t filterID;
      uint8_t length;
-     uint8_t payload[payloadMaxSize];
+     uint8_t payload[BUFFERSIZE];
 } CMessage;
 
 #endif

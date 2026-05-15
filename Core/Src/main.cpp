@@ -36,8 +36,14 @@ const osThreadAttr_t monitorTask_attributes = {
   .priority = (osPriority_t) osPriorityHigh
 };
 osMessageQueueId_t messageQueueHandle;
+uint8_t messageQueueBuffer[ 64 * sizeof( CMessage ) ];
+StaticQueue_t messageQueueControlBlock;
 const osMessageQueueAttr_t messageQueue_attributes = {
-  .name = "messageQueue"
+  .name = "messageQueue",
+  .cb_mem = &messageQueueControlBlock,
+  .cb_size = sizeof(messageQueueControlBlock),
+  .mq_mem = &messageQueueBuffer,
+  .mq_size = sizeof(messageQueueBuffer)
 };
 osTimerId_t timer10msHandle;
 const osTimerAttr_t timer10ms_attributes = {
@@ -345,7 +351,7 @@ inline void updateDateAndTime(const uint32_t ID, const uint8_t *data)
     if (!isDateReady && (ID == 0x0310))
     {
         const auto isWinterTime{false};
-        const uint32_t timeOffset{isWinterTime ? 5639478 : 5635878 };
+        const uint32_t timeOffset{isWinterTime ? 5647183 : 5643583 };
         uint32_t dayCounter{getField(40, 16, data)};
         uint32_t timeInSeconds{(getField(8, 24, data) - timeOffset) % 86400};
         year = 0;
@@ -559,7 +565,7 @@ inline bool readOutMessages(FDCAN_HandleTypeDef *hfdcan, const uint32_t RxLocati
     {
         log("readOutMessages(): RX FIFO fill Level = %d, queue free space = %d\r\n", rxFIFOfillLevel, queueFreeSpace);
         static FDCAN_RxHeaderTypeDef rxHeader;
-        static uint8_t rxData[payloadMaxSize];
+        static uint8_t rxData[BUFFERSIZE];
 #ifdef SIMU_ENABLED
         bool result{true};
         --rxFIFOfillLevel;
@@ -774,6 +780,15 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
         ++rxFIFO1IRQcounter;
 #endif
         readOutMessages(hfdcan, FDCAN_RX_FIFO1);
+    }
+}
+
+extern "C"
+{
+    int __io_putchar(int ch)
+    {
+        HAL_UART_Transmit(&hlpuart1, (uint8_t*) &ch, 1, HAL_MAX_DELAY);
+        return ch;
     }
 }
 
