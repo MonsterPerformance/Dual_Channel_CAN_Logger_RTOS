@@ -351,7 +351,7 @@ inline void updateDateAndTime(const uint32_t ID, const uint8_t *data)
     if (!isDateReady && (ID == 0x0310))
     {
         const auto isWinterTime{false};
-        const uint32_t timeOffset{isWinterTime ? 5647183 : 5643583 };
+        const uint32_t timeOffset{isWinterTime ? 5623879 : 5620279};
         uint32_t dayCounter{getField(40, 16, data)};
         uint32_t timeInSeconds{(getField(8, 24, data) - timeOffset) % 86400};
         year = 0;
