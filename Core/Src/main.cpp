@@ -532,6 +532,22 @@ inline void processMessage(CMessage& message)
     const auto filterID{message.filterID};
     const auto length{message.length};
     const auto payload{message.payload};
+    static bool isSportMode{false};
+    static bool isUnlockPressed{false};
+    // reset MCU if sport mode selected and unlock button pressed
+    if (ID == 0x01D2)
+    {
+        isSportMode = (getField(32, 2, payload) == 0x01);
+    }
+    if (ID == 0x0198)
+    {
+        isUnlockPressed = (getField(28, 1, payload) == 0x01);
+    }
+    if (isSportMode && isUnlockPressed)
+    {
+        HAL_NVIC_SystemReset();
+    }
+    // reset should have happened if ^^^ is true
     if (!isSenderEnabled && (ID == 0x00AA) && (300 < getField(34, 14, payload)))
     {
         isSenderEnabled = true;    // RPM is non-zero
